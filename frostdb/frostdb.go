@@ -2,8 +2,10 @@ package frostdb
 
 import (
 	"context"
+	"strings"
 
 	"github.com/apache/arrow/go/v8/arrow"
+	"github.com/apache/arrow/go/v8/arrow/array"
 	"github.com/apache/arrow/go/v8/arrow/memory"
 	"github.com/go-kit/log"
 	"github.com/polarsignals/frostdb"
@@ -14,6 +16,7 @@ import (
 	"github.com/prometheus/prometheus/model/exemplar"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/segmentio/parquet-go"
 )
 
@@ -192,24 +195,107 @@ func promSchema() *dynparquet.Schema {
 // TODO: converting arrow records into a series set somehow....
 // a series set is multiple different series.
 // but arrow records is a single series
-type arrowSeriesSet []arrow.Record
+type arrowSeriesSet struct {
+	recordIdx int
+	colIdx    int
+	records   []arrow.Record
+	l         labels.Labels
+}
+
+type arrowSeries struct {
+	*arrowSeriesSet
+}
 
 func (a *arrowSeriesSet) Next() bool {
-	return false
+	r := a.records[a.recordIdx]
+	if a.colIdx+1 != int(r.NumCols()) {
+		a.colIdx++
+		return true
+	}
+
+	// exhausted columns in current record
+	a.colIdx = 0
+	if a.recordIdx == len(a.records) {
+		return false
+	}
+	a.records[a.recordIdx].Release()
+	a.recordIdx++
+	return true
 }
+
+func (a *arrowSeries) Labels() labels.Labels {
+
+	l := labels.Labels{}
+	r := a.records[a.recordIdx]
+	for i := int(0); i < int(r.NumCols()); i++ {
+		if !strings.HasPrefix(r.ColumnName(i), "labels") {
+			return l
+		}
+
+		// Build labels
+		name := strings.TrimPrefix(r.ColumnName(i), "labels")
+		value := r.Column(i).(*array.String).Value(a.colIdx)
+		l = append(l, labels.Label{
+			Name:  name,
+			Value: value,
+		})
+	}
+
+	return l
+}
+
+// TODO
+func (a *arrowSeries) Iterator() chunkenc.Iterator {
+	return a
+}
+
+func (a *arrowSeries) Next() bool {
+	a.colIdx++
+	// handle colIdx rollover
+	r := a.records[a.recordIdx]
+	if a.colIdx == int(r.NumCols()) {
+		a.colIdx = 0
+		a.recordIdx++
+		if a.recordIdx == len(a.records) {
+			return false
+		}
+	}
+
+	// TODO we aren't handling label changes between rows
+
+	return true
+}
+
+func (a *arrowSeries) Seek(i int64) bool {
+	return false // TODO
+}
+
+func (a *arrowSeries) At() (int64, float64) {
+	var ts int64
+	var v float64
+	r := a.records[a.recordIdx]
+	for i := int(0); i < int(r.NumCols()); i++ {
+		switch {
+		case strings.HasPrefix(r.ColumnName(i), "value"):
+			v = r.Column(i).(*array.Float64).Value(a.colIdx)
+		case strings.HasPrefix(r.ColumnName(i), "timestamp"):
+			ts = r.Column(i).(*array.Int64).Value(a.colIdx)
+		}
+	}
+
+	return ts, v
+}
+
+func (a *arrowSeries) Err() error { return nil }
 
 func (a *arrowSeriesSet) At() storage.Series {
-	return nil
+	return &arrowSeries{a}
 }
 
-func (a *arrowSeriesSet) Err() error {
-	return nil
-}
-
-func (a *arrowSeriesSet) Warnings() storage.Warnings {
-	return nil
-}
-
+func (a *arrowSeriesSet) Err() error                 { return nil }
+func (a *arrowSeriesSet) Warnings() storage.Warnings { return nil }
 func seriesSetFromRecords(ar []arrow.Record) storage.SeriesSet {
-	return nil
+	return &arrowSeriesSet{
+		records: ar,
+	}
 }
