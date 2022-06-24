@@ -56,6 +56,7 @@ import (
 	"github.com/prometheus/prometheus/discovery"
 	"github.com/prometheus/prometheus/discovery/legacymanager"
 	"github.com/prometheus/prometheus/discovery/targetgroup"
+	"github.com/prometheus/prometheus/frostdb"
 	"github.com/prometheus/prometheus/model/exemplar"
 	"github.com/prometheus/prometheus/model/labels"
 	"github.com/prometheus/prometheus/model/relabel"
@@ -1115,37 +1116,20 @@ func main() {
 	level.Info(logger).Log("msg", "See you next time!")
 }
 
-func openDBWithMetrics(dir string, logger log.Logger, reg prometheus.Registerer, opts *tsdb.Options, stats *tsdb.DBStats) (*tsdb.DB, error) {
-	db, err := tsdb.Open(
-		dir,
-		log.With(logger, "component", "tsdb"),
-		reg,
-		opts,
-		stats,
-	)
+func openDBWithMetrics(dir string, logger log.Logger, reg prometheus.Registerer, opts *tsdb.Options, stats *tsdb.DBStats) (storage.Storage, error) {
+	db, err := frostdb.Open(reg, logger)
+	/*
+		db, err := tsdb.Open(
+			dir,
+			log.With(logger, "component", "tsdb"),
+			reg,
+			opts,
+			stats,
+		)
+	*/
 	if err != nil {
 		return nil, err
 	}
-
-	reg.MustRegister(
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name: "prometheus_tsdb_lowest_timestamp_seconds",
-			Help: "Lowest timestamp value stored in the database.",
-		}, func() float64 {
-			bb := db.Blocks()
-			if len(bb) == 0 {
-				return float64(db.Head().MinTime() / 1000)
-			}
-			return float64(db.Blocks()[0].Meta().MinTime / 1000)
-		}), prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name: "prometheus_tsdb_head_min_time_seconds",
-			Help: "Minimum time bound of the head block.",
-		}, func() float64 { return float64(db.Head().MinTime() / 1000) }),
-		prometheus.NewGaugeFunc(prometheus.GaugeOpts{
-			Name: "prometheus_tsdb_head_max_time_seconds",
-			Help: "Maximum timestamp of the head block.",
-		}, func() float64 { return float64(db.Head().MaxTime() / 1000) }),
-	)
 
 	return db, nil
 }
