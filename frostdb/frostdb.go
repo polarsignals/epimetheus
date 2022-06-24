@@ -3,10 +3,13 @@ package frostdb
 import (
 	"context"
 
+	"github.com/apache/arrow/go/v8/arrow"
+	"github.com/apache/arrow/go/v8/arrow/memory"
 	"github.com/go-kit/log"
 	"github.com/polarsignals/frostdb"
 	frost "github.com/polarsignals/frostdb"
 	"github.com/polarsignals/frostdb/dynparquet"
+	"github.com/polarsignals/frostdb/query/logicalplan"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/prometheus/model/exemplar"
 	"github.com/prometheus/prometheus/model/labels"
@@ -24,6 +27,10 @@ type FrostAppender struct {
 	ctx      context.Context
 	schema   *dynparquet.Schema
 	tableRef *frostdb.Table
+}
+
+type FrostQuerier struct {
+	*FrostDB
 }
 
 // Open a new frostDB
@@ -54,9 +61,50 @@ func (f *FrostDB) Query() error {
 	return nil
 }
 
+func (f *FrostQuerier) LabelValues(name string, matchers ...*labels.Matcher) ([]string, storage.Warnings, error) {
+	return nil, nil, nil
+}
+
+func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storage.Warnings, error) {
+	return nil, nil, nil
+}
+
+func (f *FrostQuerier) Close() error { return nil }
+
+func (f *FrostQuerier) Select(sortSeries bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
+
+	exprs := []logicalplan.Expr{
+		logicalplan.Col("timestamp").GT(logicalplan.Literal(hints.Start)),
+		logicalplan.Col("timestamp").LT(logicalplan.Literal(hints.End)),
+	}
+	// Build a filter from matchers
+	for _, matcher := range matchers {
+		switch matcher.Type {
+		case labels.MatchEqual:
+			exprs = append(exprs, logicalplan.Col(matcher.Name).Eq(logicalplan.Literal(matcher.Value)))
+		case labels.MatchNotEqual:
+			exprs = append(exprs, logicalplan.Col(matcher.Name).NotEq(logicalplan.Literal(matcher.Value)))
+		case labels.MatchRegexp:
+			exprs = append(exprs, logicalplan.Col(matcher.Name).RegexMatch(matcher.Value))
+		case labels.MatchNotRegexp:
+			exprs = append(exprs, logicalplan.Col(matcher.Name).RegexNotMatch(matcher.Value))
+		}
+	}
+
+	records := []arrow.Record{}
+	f.table.View(func(tx uint64) error {
+		return f.table.Iterator(context.Background(), tx, memory.NewGoAllocator(), nil, logicalplan.And(exprs...), nil, func(ar arrow.Record) error {
+			records = append(records, ar)
+			ar.Retain() // retain so we can use them outside of this function
+			return nil
+		})
+	})
+	return seriesSetFromRecords(records)
+}
+
 // Querier implements the storage.Queryable interface
 func (f *FrostDB) Querier(ctx context.Context, mint, maxt int64) (storage.Querier, error) {
-	return nil, nil
+	return &FrostQuerier{f}, nil
 }
 
 func (f *FrostDB) StartTime() (int64, error) {
@@ -139,4 +187,29 @@ func promSchema() *dynparquet.Schema {
 			dynparquet.Ascending("timestamp"),
 		},
 	)
+}
+
+// TODO: converting arrow records into a series set somehow....
+// a series set is multiple different series.
+// but arrow records is a single series
+type arrowSeriesSet []arrow.Record
+
+func (a *arrowSeriesSet) Next() bool {
+	return false
+}
+
+func (a *arrowSeriesSet) At() storage.Series {
+	return nil
+}
+
+func (a *arrowSeriesSet) Err() error {
+	return nil
+}
+
+func (a *arrowSeriesSet) Warnings() storage.Warnings {
+	return nil
+}
+
+func seriesSetFromRecords(ar []arrow.Record) storage.SeriesSet {
+	return nil
 }
