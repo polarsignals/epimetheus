@@ -2,6 +2,7 @@ package frostdb
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/apache/arrow/go/v8/arrow"
@@ -84,20 +85,23 @@ func (f *FrostQuerier) Select(sortSeries bool, hints *storage.SelectHints, match
 	for _, matcher := range matchers {
 		switch matcher.Type {
 		case labels.MatchEqual:
-			exprs = append(exprs, logicalplan.Col(matcher.Name).Eq(logicalplan.Literal(matcher.Value)))
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).Eq(logicalplan.Literal(matcher.Value)))
 		case labels.MatchNotEqual:
-			exprs = append(exprs, logicalplan.Col(matcher.Name).NotEq(logicalplan.Literal(matcher.Value)))
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).NotEq(logicalplan.Literal(matcher.Value)))
 		case labels.MatchRegexp:
-			exprs = append(exprs, logicalplan.Col(matcher.Name).RegexMatch(matcher.Value))
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).RegexMatch(matcher.Value))
 		case labels.MatchNotRegexp:
-			exprs = append(exprs, logicalplan.Col(matcher.Name).RegexNotMatch(matcher.Value))
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).RegexNotMatch(matcher.Value))
 		}
 	}
+
+	fmt.Println("Filter: ", logicalplan.And(exprs...))
 
 	records := []arrow.Record{}
 	f.table.View(func(tx uint64) error {
 		return f.table.Iterator(context.Background(), tx, memory.NewGoAllocator(), nil, logicalplan.And(exprs...), nil, func(ar arrow.Record) error {
 			records = append(records, ar)
+			fmt.Println("Record: ", ar)
 			ar.Retain() // retain so we can use them outside of this function
 			return nil
 		})
