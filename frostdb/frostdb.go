@@ -34,17 +34,19 @@ func Open(reg prometheus.Registerer, logger log.Logger) (*FrostDB, error) {
 		10*1024*1024,
 	)
 	db, _ := store.DB("prometheus")
+	schema := promSchema()
 	table, err := db.Table(
 		"metrics",
-		frost.NewTableConfig(promSchema()),
+		frost.NewTableConfig(schema),
 		logger,
 	)
 	if err != nil {
 		return nil, err
 	}
 	return &FrostDB{
-		store: store,
-		table: table,
+		store:  store,
+		schema: schema,
+		table:  table,
 	}, nil
 }
 
@@ -90,8 +92,8 @@ func (f *FrostAppender) Append(ref storage.SeriesRef, l labels.Labels, t int64, 
 	}
 
 	// Add timestamp and value to row
-	row = append(row, parquet.ValueOf(t).Level(0, 0, 2))
-	row = append(row, parquet.ValueOf(v).Level(0, 0, 3))
+	row = append(row, parquet.ValueOf(t).Level(0, 0, len(l)))
+	row = append(row, parquet.ValueOf(v).Level(0, 0, len(l)+1))
 
 	_, err = buf.WriteRows([]parquet.Row{row})
 	if err != nil {
