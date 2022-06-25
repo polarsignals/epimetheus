@@ -95,8 +95,6 @@ func (f *FrostQuerier) Select(sortSeries bool, hints *storage.SelectHints, match
 		}
 	}
 
-	fmt.Println("Filter: ", logicalplan.And(exprs...))
-
 	records := []arrow.Record{}
 	f.table.View(func(tx uint64) error {
 		return f.table.Iterator(context.Background(), tx, memory.NewGoAllocator(), nil, logicalplan.And(exprs...), nil, func(ar arrow.Record) error {
@@ -178,7 +176,7 @@ func promSchema() *dynparquet.Schema {
 		"metrics_schema",
 		[]dynparquet.ColumnDefinition{{
 			Name:          "labels",
-			StorageLayout: parquet.Encoded(parquet.Optional(parquet.String()), &parquet.RLEDictionary),
+			StorageLayout: parquet.Encoded(parquet.String(), &parquet.RLEDictionary),
 			Dynamic:       true,
 		}, {
 			Name:          "timestamp",
@@ -200,6 +198,7 @@ func promSchema() *dynparquet.Schema {
 // a series set is multiple different series.
 // but arrow records is a single series
 type arrowSeriesSet struct {
+	sets      []uint64
 	recordIdx int
 	colIdx    int
 	records   []arrow.Record
@@ -211,19 +210,23 @@ type arrowSeries struct {
 }
 
 func (a *arrowSeriesSet) Next() bool {
+	if a.records == nil || a.recordIdx >= len(a.records) {
+		return false
+	}
+
 	r := a.records[a.recordIdx]
-	if a.colIdx+1 != int(r.NumCols()) {
-		a.colIdx++
+	a.colIdx++
+	if a.colIdx < r.Column(0).Len() {
 		return true
 	}
 
 	// exhausted columns in current record
-	a.colIdx = 0
-	if a.recordIdx == len(a.records) {
-		return false
-	}
+	a.colIdx = -1
 	a.records[a.recordIdx].Release()
 	a.recordIdx++
+	if a.recordIdx >= len(a.records) {
+		return false
+	}
 	return true
 }
 
@@ -238,10 +241,10 @@ func (a *arrowSeries) Labels() labels.Labels {
 
 		// Build labels
 		name := strings.TrimPrefix(r.ColumnName(i), "labels")
-		value := r.Column(i).(*array.String).Value(a.colIdx)
+		value := r.Column(i).(*array.Binary).Value(a.colIdx)
 		l = append(l, labels.Label{
 			Name:  name,
-			Value: value,
+			Value: string(value),
 		})
 	}
 
@@ -257,10 +260,10 @@ func (a *arrowSeries) Next() bool {
 	a.colIdx++
 	// handle colIdx rollover
 	r := a.records[a.recordIdx]
-	if a.colIdx == int(r.NumCols()) {
-		a.colIdx = 0
+	if a.colIdx >= int(r.Column(0).Len()) {
+		a.colIdx = -1
 		a.recordIdx++
-		if a.recordIdx == len(a.records) {
+		if a.recordIdx >= len(a.records) {
 			return false
 		}
 	}
@@ -299,7 +302,47 @@ func (a *arrowSeriesSet) At() storage.Series {
 func (a *arrowSeriesSet) Err() error                 { return nil }
 func (a *arrowSeriesSet) Warnings() storage.Warnings { return nil }
 func seriesSetFromRecords(ar []arrow.Record) storage.SeriesSet {
-	return &arrowSeriesSet{
-		records: ar,
+
+	// Find all label sets to determine number of series in records
+	sets := []uint64{}
+	setmap := map[uint64]bool{}
+	for _, r := range ar {
+		lbls := labelsFromRecord(r)
+		for _, l := range lbls {
+			h := l.Hash()
+			if !setmap[h] {
+				setmap[h] = true
+				sets = append(sets, h)
+			}
+		}
 	}
+
+	return &arrowSeriesSet{
+		sets:    sets,
+		records: ar,
+		colIdx:  -1,
+	}
+}
+
+func labelsFromRecord(r arrow.Record) []labels.Labels {
+
+	l := []labels.Labels{}
+	for i := 0; i < r.Column(0).Len(); i++ {
+		lbls := labels.Labels{}
+		for j := 0; j < int(r.NumCols()); j++ {
+			if !strings.HasPrefix(r.ColumnName(j), "labels") {
+				l = append(l, lbls)
+				break
+			}
+
+			name := strings.TrimPrefix(r.ColumnName(j), "labels")
+			value := r.Column(j).(*array.Binary).Value(i)
+			lbls = append(lbls, labels.Label{
+				Name:  name,
+				Value: string(value),
+			})
+		}
+	}
+
+	return l
 }
