@@ -194,83 +194,39 @@ func promSchema() *dynparquet.Schema {
 	)
 }
 
-// TODO: converting arrow records into a series set somehow....
-// a series set is multiple different series.
-// but arrow records is a single series
 type arrowSeriesSet struct {
-	sets      []uint64
-	recordIdx int
-	colIdx    int
-	records   []arrow.Record
-	l         labels.Labels
+	index int
+	sets  []series
 }
 
 type arrowSeries struct {
-	*arrowSeriesSet
+	index int
+	series
 }
 
 func (a *arrowSeriesSet) Next() bool {
-	if a.records == nil || a.recordIdx >= len(a.records) {
-		return false
-	}
-
-	r := a.records[a.recordIdx]
-	a.colIdx++
-	if a.colIdx < r.Column(0).Len() {
-		return true
-	}
-
-	// exhausted columns in current record
-	a.colIdx = -1
-	a.records[a.recordIdx].Release()
-	a.recordIdx++
-	if a.recordIdx >= len(a.records) {
-		return false
-	}
-	return true
+	a.index++
+	return a.index < len(a.sets)
 }
 
-func (a *arrowSeries) Labels() labels.Labels {
-
-	l := labels.Labels{}
-	r := a.records[a.recordIdx]
-	for i := int(0); i < int(r.NumCols()); i++ {
-		if !strings.HasPrefix(r.ColumnName(i), "labels") {
-			return l
-		}
-
-		// Build labels
-		name := strings.TrimPrefix(r.ColumnName(i), "labels")
-		value := r.Column(i).(*array.Binary).Value(a.colIdx)
-		l = append(l, labels.Label{
-			Name:  name,
-			Value: string(value),
-		})
+func (a *arrowSeriesSet) At() storage.Series {
+	return &arrowSeries{
+		index:  -1,
+		series: a.sets[a.index],
 	}
-
-	return l
 }
 
-// TODO
+func (a *arrowSeriesSet) Err() error                 { return nil }
+func (a *arrowSeriesSet) Warnings() storage.Warnings { return nil }
+
+func (a *arrowSeries) Labels() labels.Labels { return a.l }
 func (a *arrowSeries) Iterator() chunkenc.Iterator {
 	return a
 }
 
 func (a *arrowSeries) Next() bool {
-	a.colIdx++
-	// handle colIdx rollover
-	r := a.records[a.recordIdx]
-	if a.colIdx >= int(r.Column(0).Len()) {
-		a.colIdx = -1
-		a.recordIdx++
-		if a.recordIdx >= len(a.records) {
-			return false
-		}
-	}
-
-	// TODO we aren't handling label changes between rows
-
-	return true
+	a.index++
+	return a.index < len(a.ts)
 }
 
 func (a *arrowSeries) Seek(i int64) bool {
@@ -278,71 +234,79 @@ func (a *arrowSeries) Seek(i int64) bool {
 }
 
 func (a *arrowSeries) At() (int64, float64) {
-	var ts int64
-	var v float64
-	r := a.records[a.recordIdx]
-	for i := int(0); i < int(r.NumCols()); i++ {
-		switch {
-		case strings.HasPrefix(r.ColumnName(i), "value"):
-			v = r.Column(i).(*array.Float64).Value(a.colIdx)
-		case strings.HasPrefix(r.ColumnName(i), "timestamp"):
-			ts = r.Column(i).(*array.Int64).Value(a.colIdx)
-		}
-	}
-
-	return ts, v
+	return a.ts[a.index], a.v[a.index]
 }
 
 func (a *arrowSeries) Err() error { return nil }
 
-func (a *arrowSeriesSet) At() storage.Series {
-	return &arrowSeries{a}
-}
-
-func (a *arrowSeriesSet) Err() error                 { return nil }
-func (a *arrowSeriesSet) Warnings() storage.Warnings { return nil }
 func seriesSetFromRecords(ar []arrow.Record) storage.SeriesSet {
 
-	// Find all label sets to determine number of series in records
-	sets := []uint64{}
-	setmap := map[uint64]bool{}
+	sets := map[uint64]series{}
 	for _, r := range ar {
-		lbls := labelsFromRecord(r)
-		for _, l := range lbls {
-			h := l.Hash()
-			if !setmap[h] {
-				setmap[h] = true
-				sets = append(sets, h)
+		seriesset := parseRecord(r)
+		for id, set := range seriesset {
+			if s, ok := sets[id]; ok {
+				s.ts = append(s.ts, set.ts...)
+				s.v = append(s.v, set.v...)
+			} else {
+				sets[id] = set
 			}
 		}
+	}
+
+	// Flatten sets
+	ss := []series{}
+	for _, s := range sets {
+		ss = append(ss, s)
 	}
 
 	return &arrowSeriesSet{
-		sets:    sets,
-		records: ar,
-		colIdx:  -1,
+		index: -1,
+		sets:  ss,
 	}
 }
 
-func labelsFromRecord(r arrow.Record) []labels.Labels {
+type series struct {
+	l  labels.Labels
+	ts []int64
+	v  []float64
+}
 
-	l := []labels.Labels{}
+func parseRecord(r arrow.Record) map[uint64]series {
+
+	seriesset := map[uint64]series{}
+
 	for i := 0; i < r.Column(0).Len(); i++ {
 		lbls := labels.Labels{}
+		var ts int64
+		var v float64
 		for j := 0; j < int(r.NumCols()); j++ {
-			if !strings.HasPrefix(r.ColumnName(j), "labels") {
-				l = append(l, lbls)
-				break
+			switch {
+			case r.ColumnName(j) == "timestamp":
+				ts = r.Column(j).(*array.Int64).Value(i)
+			case r.ColumnName(j) == "value":
+				v = r.Column(j).(*array.Float64).Value(i)
+			default:
+				name := strings.TrimPrefix(r.ColumnName(j), "labels")
+				value := r.Column(j).(*array.Binary).Value(i)
+				lbls = append(lbls, labels.Label{
+					Name:  name,
+					Value: string(value),
+				})
 			}
-
-			name := strings.TrimPrefix(r.ColumnName(j), "labels")
-			value := r.Column(j).(*array.Binary).Value(i)
-			lbls = append(lbls, labels.Label{
-				Name:  name,
-				Value: string(value),
-			})
+		}
+		h := lbls.Hash()
+		if es, ok := seriesset[h]; ok {
+			es.ts = append(es.ts, ts)
+			es.v = append(es.v, v)
+		} else {
+			seriesset[h] = series{
+				ts: []int64{ts},
+				v:  []float64{v},
+				l:  lbls,
+			}
 		}
 	}
 
-	return l
+	return seriesset
 }
