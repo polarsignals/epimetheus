@@ -81,9 +81,14 @@ func (f *FrostQuerier) LabelValues(name string, matchers ...*labels.Matcher) ([]
 		}
 	}
 
+	var expr logicalplan.Expr
+	if len(exprs) != 0 {
+		expr = logicalplan.And(exprs...)
+	}
+
 	records := []arrow.Record{}
 	err := f.table.View(func(tx uint64) error {
-		return f.table.Iterator(context.Background(), tx, memory.NewGoAllocator(), nil, logicalplan.And(exprs...), nil, func(ar arrow.Record) error {
+		return f.table.Iterator(context.Background(), tx, memory.NewGoAllocator(), nil, expr, nil, func(ar arrow.Record) error {
 			records = append(records, ar)
 			ar.Retain() // retain so we can use them outside of this function
 			return nil
@@ -120,9 +125,14 @@ func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storag
 		}
 	}
 
+	var expr logicalplan.Expr
+	if len(exprs) != 0 {
+		expr = logicalplan.And(exprs...)
+	}
+
 	records := []arrow.Record{}
 	err := f.table.View(func(tx uint64) error {
-		return f.table.Iterator(context.Background(), tx, memory.NewGoAllocator(), nil, logicalplan.And(exprs...), nil, func(ar arrow.Record) error {
+		return f.table.Iterator(context.Background(), tx, memory.NewGoAllocator(), nil, expr, nil, func(ar arrow.Record) error {
 			records = append(records, ar)
 			ar.Retain() // retain so we can use them outside of this function
 			return nil
