@@ -82,13 +82,17 @@ func (f *FrostQuerier) LabelValues(name string, matchers ...*labels.Matcher) ([]
 	}
 
 	records := []arrow.Record{}
-	f.table.View(func(tx uint64) error {
+	err := f.table.View(func(tx uint64) error {
 		return f.table.Iterator(context.Background(), tx, memory.NewGoAllocator(), nil, logicalplan.And(exprs...), nil, func(ar arrow.Record) error {
 			records = append(records, ar)
 			ar.Retain() // retain so we can use them outside of this function
 			return nil
 		})
 	})
+	if err != nil {
+		return nil, nil, err
+	}
+
 	sets := seriesSetFromRecords(records)
 	names := []string{}
 	for _, s := range sets.sets {
@@ -117,13 +121,17 @@ func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storag
 	}
 
 	records := []arrow.Record{}
-	f.table.View(func(tx uint64) error {
+	err := f.table.View(func(tx uint64) error {
 		return f.table.Iterator(context.Background(), tx, memory.NewGoAllocator(), nil, logicalplan.And(exprs...), nil, func(ar arrow.Record) error {
 			records = append(records, ar)
 			ar.Retain() // retain so we can use them outside of this function
 			return nil
 		})
 	})
+	if err != nil {
+		return nil, nil, err
+	}
+
 	sets := seriesSetFromRecords(records)
 	names := []string{}
 	for _, s := range sets.sets {
