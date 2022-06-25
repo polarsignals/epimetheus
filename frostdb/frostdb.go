@@ -66,11 +66,73 @@ func (f *FrostDB) Query() error {
 }
 
 func (f *FrostQuerier) LabelValues(name string, matchers ...*labels.Matcher) ([]string, storage.Warnings, error) {
-	return nil, nil, nil
+	exprs := []logicalplan.Expr{}
+	// Build a filter from matchers
+	for _, matcher := range matchers {
+		switch matcher.Type {
+		case labels.MatchEqual:
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).Eq(logicalplan.Literal(matcher.Value)))
+		case labels.MatchNotEqual:
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).NotEq(logicalplan.Literal(matcher.Value)))
+		case labels.MatchRegexp:
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).RegexMatch(matcher.Value))
+		case labels.MatchNotRegexp:
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).RegexNotMatch(matcher.Value))
+		}
+	}
+
+	records := []arrow.Record{}
+	f.table.View(func(tx uint64) error {
+		return f.table.Iterator(context.Background(), tx, memory.NewGoAllocator(), nil, logicalplan.And(exprs...), nil, func(ar arrow.Record) error {
+			records = append(records, ar)
+			ar.Retain() // retain so we can use them outside of this function
+			return nil
+		})
+	})
+	sets := seriesSetFromRecords(records)
+	names := []string{}
+	for _, s := range sets.sets {
+		for _, l := range s.l {
+			names = append(names, l.Value)
+		}
+	}
+
+	return names, nil, nil
 }
 
 func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storage.Warnings, error) {
-	return nil, nil, nil
+	exprs := []logicalplan.Expr{}
+	// Build a filter from matchers
+	for _, matcher := range matchers {
+		switch matcher.Type {
+		case labels.MatchEqual:
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).Eq(logicalplan.Literal(matcher.Value)))
+		case labels.MatchNotEqual:
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).NotEq(logicalplan.Literal(matcher.Value)))
+		case labels.MatchRegexp:
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).RegexMatch(matcher.Value))
+		case labels.MatchNotRegexp:
+			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).RegexNotMatch(matcher.Value))
+		}
+	}
+
+	records := []arrow.Record{}
+	f.table.View(func(tx uint64) error {
+		return f.table.Iterator(context.Background(), tx, memory.NewGoAllocator(), nil, logicalplan.And(exprs...), nil, func(ar arrow.Record) error {
+			records = append(records, ar)
+			ar.Retain() // retain so we can use them outside of this function
+			return nil
+		})
+	})
+	sets := seriesSetFromRecords(records)
+	names := []string{}
+	for _, s := range sets.sets {
+		for _, l := range s.l {
+			names = append(names, l.Name)
+		}
+	}
+
+	return names, nil, nil
 }
 
 func (f *FrostQuerier) Close() error { return nil }
@@ -239,7 +301,7 @@ func (a *arrowSeries) At() (int64, float64) {
 
 func (a *arrowSeries) Err() error { return nil }
 
-func seriesSetFromRecords(ar []arrow.Record) storage.SeriesSet {
+func seriesSetFromRecords(ar []arrow.Record) *arrowSeriesSet {
 
 	sets := map[uint64]series{}
 	for _, r := range ar {
