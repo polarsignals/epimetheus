@@ -2,7 +2,6 @@ package frostdb
 
 import (
 	"context"
-	"fmt"
 	"strings"
 
 	"github.com/apache/arrow/go/v8/arrow"
@@ -179,7 +178,6 @@ func (f *FrostQuerier) Select(sortSeries bool, hints *storage.SelectHints, match
 	f.table.View(func(tx uint64) error {
 		return f.table.Iterator(context.Background(), tx, memory.NewGoAllocator(), nil, logicalplan.And(exprs...), nil, func(ar arrow.Record) error {
 			records = append(records, ar)
-			fmt.Println("Record: ", ar)
 			ar.Retain() // retain so we can use them outside of this function
 			return nil
 		})
@@ -276,12 +274,12 @@ func promSchema() *dynparquet.Schema {
 
 type arrowSeriesSet struct {
 	index int
-	sets  []series
+	sets  []*series
 }
 
 type arrowSeries struct {
 	index int
-	series
+	*series
 }
 
 func (a *arrowSeriesSet) Next() bool {
@@ -310,7 +308,12 @@ func (a *arrowSeries) Next() bool {
 }
 
 func (a *arrowSeries) Seek(i int64) bool {
-	return false // TODO
+	for ; a.index < len(a.series.ts); a.index++ {
+		if a.series.ts[a.index] >= i {
+			return true
+		}
+	}
+	return false
 }
 
 func (a *arrowSeries) At() (int64, float64) {
@@ -321,7 +324,7 @@ func (a *arrowSeries) Err() error { return nil }
 
 func seriesSetFromRecords(ar []arrow.Record) *arrowSeriesSet {
 
-	sets := map[uint64]series{}
+	sets := map[uint64]*series{}
 	for _, r := range ar {
 		seriesset := parseRecord(r)
 		for id, set := range seriesset {
@@ -329,19 +332,17 @@ func seriesSetFromRecords(ar []arrow.Record) *arrowSeriesSet {
 				s.ts = append(s.ts, set.ts...)
 				s.v = append(s.v, set.v...)
 			} else {
-				sets[id] = set
+				sets[id] = &set
 			}
 		}
 		r.Release()
 	}
 
 	// Flatten sets
-	ss := []series{}
+	ss := []*series{}
 	for _, s := range sets {
 		ss = append(ss, s)
 	}
-
-	fmt.Println("Flattened: ", ss)
 
 	return &arrowSeriesSet{
 		index: -1,
