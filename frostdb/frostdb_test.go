@@ -94,3 +94,7 @@ func Test_Arrow_Record_SeriesSet(t *testing.T) {
 		}
 	}
 }
+
+func Test_Merge(t *testing.T) {
+	fmt.Println(merge([]int64{0, 1, 4}, []int64{2, 3, 7}, []float64{1, 1, 1}, []float64{5, 5, 5}))
+}
