@@ -57,7 +57,33 @@ func Test_Arrow_Record_SeriesSet(t *testing.T) {
 	rec1 := b.NewRecord()
 	defer rec1.Release()
 
-	sset := seriesSetFromRecords([]arrow.Record{rec1})
+	b.Field(0).(*array.BinaryBuilder).AppendValues(
+		[][]byte{[]byte("go_goroutines")},
+		nil,
+	)
+	b.Field(1).(*array.BinaryBuilder).AppendValues(
+		[][]byte{[]byte("localhost:9090")},
+		nil,
+	)
+	b.Field(2).(*array.BinaryBuilder).AppendValues(
+		[][]byte{[]byte("epimetheus")},
+		nil,
+	)
+	b.Field(3).(*array.Int64Builder).AppendValues(
+		[]int64{165611609999},
+		nil,
+	)
+	b.Field(4).(*array.Float64Builder).AppendValues(
+		[]float64{30},
+		nil,
+	)
+	rec2 := b.NewRecord()
+	defer rec2.Release()
+
+	fmt.Println("rec1: ", rec1)
+	fmt.Println("rec2: ", rec2)
+
+	sset := seriesSetFromRecords([]arrow.Record{rec1, rec2})
 	for sset.Next() {
 		set := sset.At()
 		fmt.Println("Labels: ", set.Labels())
