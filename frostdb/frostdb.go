@@ -2,6 +2,8 @@ package frostdb
 
 import (
 	"context"
+	"fmt"
+	"math"
 	"strings"
 
 	"github.com/apache/arrow/go/v8/arrow"
@@ -329,8 +331,7 @@ func seriesSetFromRecords(ar []arrow.Record) *arrowSeriesSet {
 		seriesset := parseRecord(r)
 		for id, set := range seriesset {
 			if s, ok := sets[id]; ok {
-				s.ts = append(s.ts, set.ts...)
-				s.v = append(s.v, set.v...)
+				s.ts, s.v = merge(s.ts, set.ts, s.v, set.v)
 			} else {
 				sets[id] = &set
 			}
@@ -342,6 +343,10 @@ func seriesSetFromRecords(ar []arrow.Record) *arrowSeriesSet {
 	ss := []*series{}
 	for _, s := range sets {
 		ss = append(ss, s)
+	}
+
+	for _, s := range ss {
+		fmt.Println("Flattened: ", s)
 	}
 
 	return &arrowSeriesSet{
@@ -393,4 +398,45 @@ func parseRecord(r arrow.Record) map[uint64]series {
 	}
 
 	return seriesset
+}
+
+// merge's a,b into an ordered list, maintains this same order for the floats
+func merge(a, b []int64, af, bf []float64) ([]int64, []float64) {
+
+	ai := 0
+	bi := 0
+
+	result := []int64{}
+	floats := []float64{}
+	for {
+		av := int64(math.MaxInt64)
+		bv := int64(math.MaxInt64)
+
+		if ai < len(a) {
+			av = a[ai]
+		}
+
+		if bi < len(b) {
+			bv = b[bi]
+		}
+
+		if av == math.MaxInt64 && bv == math.MaxInt64 {
+			return result, floats
+		}
+
+		var min int64
+		var f float64
+		switch {
+		case av <= bv:
+			min = av
+			f = af[bi]
+			ai++
+		default:
+			min = bv
+			f = bf[bi]
+			bi++
+		}
+		result = append(result, min)
+		floats = append(floats, f)
+	}
 }
