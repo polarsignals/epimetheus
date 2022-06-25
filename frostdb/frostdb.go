@@ -252,6 +252,7 @@ func seriesSetFromRecords(ar []arrow.Record) storage.SeriesSet {
 				sets[id] = set
 			}
 		}
+		r.Release()
 	}
 
 	// Flatten sets
@@ -259,6 +260,8 @@ func seriesSetFromRecords(ar []arrow.Record) storage.SeriesSet {
 	for _, s := range sets {
 		ss = append(ss, s)
 	}
+
+	fmt.Println("Flattened: ", ss)
 
 	return &arrowSeriesSet{
 		index: -1,
@@ -287,7 +290,7 @@ func parseRecord(r arrow.Record) map[uint64]series {
 			case r.ColumnName(j) == "value":
 				v = r.Column(j).(*array.Float64).Value(i)
 			default:
-				name := strings.TrimPrefix(r.ColumnName(j), "labels")
+				name := strings.TrimPrefix(r.ColumnName(j), "labels.")
 				value := r.Column(j).(*array.Binary).Value(i)
 				lbls = append(lbls, labels.Label{
 					Name:  name,
