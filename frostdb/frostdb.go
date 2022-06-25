@@ -2,7 +2,6 @@ package frostdb
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"strings"
 
@@ -345,10 +344,6 @@ func seriesSetFromRecords(ar []arrow.Record) *arrowSeriesSet {
 		ss = append(ss, s)
 	}
 
-	for _, s := range ss {
-		fmt.Println("Flattened: ", s)
-	}
-
 	return &arrowSeriesSet{
 		index: -1,
 		sets:  ss,
@@ -429,7 +424,7 @@ func merge(a, b []int64, af, bf []float64) ([]int64, []float64) {
 		switch {
 		case av <= bv:
 			min = av
-			f = af[bi]
+			f = af[ai]
 			ai++
 		default:
 			min = bv
