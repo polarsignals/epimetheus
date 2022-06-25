@@ -21,9 +21,9 @@ func Test_Arrow_Record_SeriesSet(t *testing.T) {
 	*/
 	schema := arrow.NewSchema(
 		[]arrow.Field{
-			{Name: "labels.__name__", Type: arrow.BinaryTypes.String},
-			{Name: "labels.instance", Type: arrow.BinaryTypes.String},
-			{Name: "labels.job", Type: arrow.BinaryTypes.String},
+			{Name: "labels.__name__", Type: arrow.BinaryTypes.Binary},
+			{Name: "labels.instance", Type: arrow.BinaryTypes.Binary},
+			{Name: "labels.job", Type: arrow.BinaryTypes.Binary},
 			{Name: "timestamp", Type: arrow.PrimitiveTypes.Int64},
 			{Name: "value", Type: arrow.PrimitiveTypes.Float64},
 		},
@@ -33,16 +33,16 @@ func Test_Arrow_Record_SeriesSet(t *testing.T) {
 	b := array.NewRecordBuilder(mem, schema)
 	defer b.Release()
 
-	b.Field(0).(*array.StringBuilder).AppendValues(
-		[]string{"go_goroutines"},
+	b.Field(0).(*array.BinaryBuilder).AppendValues(
+		[][]byte{[]byte("go_goroutines")},
 		nil,
 	)
-	b.Field(1).(*array.StringBuilder).AppendValues(
-		[]string{"localhost:9090"},
+	b.Field(1).(*array.BinaryBuilder).AppendValues(
+		[][]byte{[]byte("localhost:9090")},
 		nil,
 	)
-	b.Field(2).(*array.StringBuilder).AppendValues(
-		[]string{"epimetheus"},
+	b.Field(2).(*array.BinaryBuilder).AppendValues(
+		[][]byte{[]byte("epimetheus")},
 		nil,
 	)
 	b.Field(3).(*array.Int64Builder).AppendValues(
@@ -57,5 +57,14 @@ func Test_Arrow_Record_SeriesSet(t *testing.T) {
 	rec1 := b.NewRecord()
 	defer rec1.Release()
 
-	fmt.Println(rec1)
+	sset := seriesSetFromRecords([]arrow.Record{rec1})
+	for sset.Next() {
+		set := sset.At()
+		fmt.Println("Labels: ", set.Labels())
+		it := set.Iterator()
+		for it.Next() {
+			ts, v := it.At()
+			fmt.Println("At: ", ts, v)
+		}
+	}
 }
