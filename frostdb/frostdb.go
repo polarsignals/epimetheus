@@ -2,6 +2,7 @@ package frostdb
 
 import (
 	"context"
+	"fmt"
 	"math"
 	"strings"
 
@@ -12,6 +13,7 @@ import (
 	"github.com/polarsignals/frostdb"
 	frost "github.com/polarsignals/frostdb"
 	"github.com/polarsignals/frostdb/dynparquet"
+	"github.com/polarsignals/frostdb/query"
 	"github.com/polarsignals/frostdb/query/logicalplan"
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/prometheus/model/exemplar"
@@ -22,6 +24,7 @@ import (
 )
 
 type FrostDB struct {
+	db     *frostdb.DB
 	schema *dynparquet.Schema
 	store  *frostdb.ColumnStore
 	table  *frostdb.Table
@@ -42,7 +45,7 @@ func Open(reg prometheus.Registerer, logger log.Logger) (*FrostDB, error) {
 	store := frost.New(
 		reg,
 		8192,
-		10*1024*1024,
+		10*1024*1024*1024,
 	)
 	db, _ := store.DB("prometheus")
 	schema := promSchema()
@@ -55,6 +58,7 @@ func Open(reg prometheus.Registerer, logger log.Logger) (*FrostDB, error) {
 		return nil, err
 	}
 	return &FrostDB{
+		db:     db,
 		store:  store,
 		schema: schema,
 		table:  table,
@@ -81,21 +85,25 @@ func (f *FrostQuerier) LabelValues(name string, matchers ...*labels.Matcher) ([]
 		}
 	}
 
-	var expr logicalplan.Expr
-	if len(exprs) != 0 {
-		expr = logicalplan.And(exprs...)
-	}
+	engine := query.NewEngine(
+		memory.NewGoAllocator(),
+		f.db.TableProvider(),
+	)
 
 	records := []arrow.Record{}
-	err := f.table.View(func(tx uint64) error {
-		return f.table.Iterator(context.Background(), tx, memory.NewGoAllocator(), nil, expr, nil, func(ar arrow.Record) error {
-			records = append(records, ar)
-			ar.Retain() // retain so we can use them outside of this function
-			return nil
-		})
+	bld := engine.ScanTable("metrics")
+	if len(exprs) != 0 {
+		bld.Filter(logicalplan.And(exprs...))
+	}
+
+	err := bld.Project(logicalplan.DynCol("labels")).Execute(context.Background(), func(ar arrow.Record) error {
+		records = append(records, ar)
+		fmt.Println(ar)
+		ar.Retain() // retain so we can use them outside of this function
+		return nil
 	})
 	if err != nil {
-		return nil, nil, err
+		fmt.Println("error: ", err)
 	}
 
 	sets := seriesSetFromRecords(records)
@@ -125,21 +133,25 @@ func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storag
 		}
 	}
 
-	var expr logicalplan.Expr
-	if len(exprs) != 0 {
-		expr = logicalplan.And(exprs...)
-	}
+	engine := query.NewEngine(
+		memory.NewGoAllocator(),
+		f.db.TableProvider(),
+	)
 
 	records := []arrow.Record{}
-	err := f.table.View(func(tx uint64) error {
-		return f.table.Iterator(context.Background(), tx, memory.NewGoAllocator(), nil, expr, nil, func(ar arrow.Record) error {
-			records = append(records, ar)
-			ar.Retain() // retain so we can use them outside of this function
-			return nil
-		})
+	bld := engine.ScanTable("metrics")
+	if len(exprs) != 0 {
+		bld.Filter(logicalplan.And(exprs...))
+	}
+
+	err := bld.Project(logicalplan.DynCol("labels")).Execute(context.Background(), func(ar arrow.Record) error {
+		records = append(records, ar)
+		fmt.Println(ar)
+		ar.Retain() // retain so we can use them outside of this function
+		return nil
 	})
 	if err != nil {
-		return nil, nil, err
+		fmt.Println("error: ", err)
 	}
 
 	sets := seriesSetFromRecords(records)
@@ -175,14 +187,28 @@ func (f *FrostQuerier) Select(sortSeries bool, hints *storage.SelectHints, match
 		}
 	}
 
+	engine := query.NewEngine(
+		memory.NewGoAllocator(),
+		f.db.TableProvider(),
+	)
+
 	records := []arrow.Record{}
-	f.table.View(func(tx uint64) error {
-		return f.table.Iterator(context.Background(), tx, memory.NewGoAllocator(), nil, logicalplan.And(exprs...), nil, func(ar arrow.Record) error {
+	err := engine.ScanTable("metrics").
+		Filter(logicalplan.And(exprs...)).
+		Project(
+			logicalplan.DynCol("labels"),
+			logicalplan.Col("timestamp"),
+			logicalplan.Col("value"),
+		).
+		Execute(context.Background(), func(ar arrow.Record) error {
 			records = append(records, ar)
+			fmt.Println(ar)
 			ar.Retain() // retain so we can use them outside of this function
 			return nil
 		})
-	})
+	if err != nil {
+		fmt.Println("error: ", err)
+	}
 	return seriesSetFromRecords(records)
 }
 
