@@ -90,25 +90,23 @@ func (f *FrostQuerier) LabelValues(name string, matchers ...*labels.Matcher) ([]
 		f.db.TableProvider(),
 	)
 
-	records := []arrow.Record{}
 	bld := engine.ScanTable("metrics")
 	if len(exprs) != 0 {
 		bld.Filter(logicalplan.And(exprs...))
 	}
 
+	sets := map[uint64]*series{}
 	err := bld.Project(logicalplan.DynCol("labels")).Execute(context.Background(), func(ar arrow.Record) error {
-		records = append(records, ar)
-		fmt.Println(ar)
-		ar.Retain() // retain so we can use them outside of this function
+		defer ar.Release()
+		parseRecordIntoSeriesSet(ar, sets)
 		return nil
 	})
 	if err != nil {
-		fmt.Println("error: ", err)
 	}
 
-	sets := seriesSetFromRecords(records)
+	s := flattenSeriesSets(sets)
 	names := []string{}
-	for _, s := range sets.sets {
+	for _, s := range s.sets {
 		for _, l := range s.l {
 			names = append(names, l.Value)
 		}
@@ -138,25 +136,24 @@ func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storag
 		f.db.TableProvider(),
 	)
 
-	records := []arrow.Record{}
 	bld := engine.ScanTable("metrics")
 	if len(exprs) != 0 {
 		bld.Filter(logicalplan.And(exprs...))
 	}
 
+	sets := map[uint64]*series{}
 	err := bld.Project(logicalplan.DynCol("labels")).Execute(context.Background(), func(ar arrow.Record) error {
-		records = append(records, ar)
-		fmt.Println(ar)
-		ar.Retain() // retain so we can use them outside of this function
+		defer ar.Release()
+		parseRecordIntoSeriesSet(ar, sets)
 		return nil
 	})
 	if err != nil {
 		fmt.Println("error: ", err)
 	}
 
-	sets := seriesSetFromRecords(records)
+	s := flattenSeriesSets(sets)
 	names := []string{}
-	for _, s := range sets.sets {
+	for _, s := range s.sets {
 		for _, l := range s.l {
 			names = append(names, l.Name)
 		}
@@ -192,7 +189,7 @@ func (f *FrostQuerier) Select(sortSeries bool, hints *storage.SelectHints, match
 		f.db.TableProvider(),
 	)
 
-	records := []arrow.Record{}
+	sets := map[uint64]*series{}
 	err := engine.ScanTable("metrics").
 		Filter(logicalplan.And(exprs...)).
 		Project(
@@ -201,15 +198,14 @@ func (f *FrostQuerier) Select(sortSeries bool, hints *storage.SelectHints, match
 			logicalplan.Col("value"),
 		).
 		Execute(context.Background(), func(ar arrow.Record) error {
-			records = append(records, ar)
-			fmt.Println(ar)
-			ar.Retain() // retain so we can use them outside of this function
+			defer ar.Release()
+			parseRecordIntoSeriesSet(ar, sets)
 			return nil
 		})
 	if err != nil {
 		fmt.Println("error: ", err)
 	}
-	return seriesSetFromRecords(records)
+	return flattenSeriesSets(sets)
 }
 
 // Querier implements the storage.Queryable interface
@@ -349,21 +345,18 @@ func (a *arrowSeries) At() (int64, float64) {
 
 func (a *arrowSeries) Err() error { return nil }
 
-func seriesSetFromRecords(ar []arrow.Record) *arrowSeriesSet {
-
-	sets := map[uint64]*series{}
-	for _, r := range ar {
-		seriesset := parseRecord(r)
-		for id, set := range seriesset {
-			if s, ok := sets[id]; ok {
-				s.ts, s.v = merge(s.ts, set.ts, s.v, set.v)
-			} else {
-				sets[id] = &set
-			}
+func parseRecordIntoSeriesSet(ar arrow.Record, sets map[uint64]*series) {
+	seriesset := parseRecord(ar)
+	for id, set := range seriesset {
+		if s, ok := sets[id]; ok {
+			s.ts, s.v = merge(s.ts, set.ts, s.v, set.v)
+		} else {
+			sets[id] = &set
 		}
-		r.Release()
 	}
+}
 
+func flattenSeriesSets(sets map[uint64]*series) *arrowSeriesSet {
 	// Flatten sets
 	ss := []*series{}
 	for _, s := range sets {
@@ -399,10 +392,12 @@ func parseRecord(r arrow.Record) map[uint64]series {
 			default:
 				name := strings.TrimPrefix(r.ColumnName(j), "labels.")
 				value := r.Column(j).(*array.Binary).Value(i)
-				lbls = append(lbls, labels.Label{
-					Name:  name,
-					Value: string(value),
-				})
+				if string(value) != "" {
+					lbls = append(lbls, labels.Label{
+						Name:  name,
+						Value: string(value),
+					})
+				}
 			}
 		}
 		h := lbls.Hash()
