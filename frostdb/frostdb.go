@@ -351,7 +351,7 @@ func parseRecordIntoSeriesSet(ar arrow.Record, sets map[uint64]*series) {
 		if s, ok := sets[id]; ok {
 			s.ts, s.v = merge(s.ts, set.ts, s.v, set.v)
 		} else {
-			sets[id] = &set
+			sets[id] = set
 		}
 	}
 }
@@ -375,11 +375,11 @@ type series struct {
 	v  []float64
 }
 
-func parseRecord(r arrow.Record) map[uint64]series {
+func parseRecord(r arrow.Record) map[uint64]*series {
 
-	seriesset := map[uint64]series{}
+	seriesset := map[uint64]*series{}
 
-	for i := 0; i < r.Column(0).Len(); i++ {
+	for i := 0; i < int(r.NumRows()); i++ {
 		lbls := labels.Labels{}
 		var ts int64
 		var v float64
@@ -405,7 +405,7 @@ func parseRecord(r arrow.Record) map[uint64]series {
 			es.ts = append(es.ts, ts)
 			es.v = append(es.v, v)
 		} else {
-			seriesset[h] = series{
+			seriesset[h] = &series{
 				ts: []int64{ts},
 				v:  []float64{v},
 				l:  lbls,
