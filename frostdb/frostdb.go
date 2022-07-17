@@ -138,27 +138,26 @@ func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storag
 		f.db.TableProvider(),
 	)
 
-	bld := engine.ScanTable("metrics")
+	bld := engine.ScanSchema("metrics")
 	if len(exprs) != 0 {
 		bld.Filter(logicalplan.And(exprs...))
 	}
 
-	sets := map[uint64]*series{}
-	err := bld.Distinct(logicalplan.DynCol("labels")).Execute(context.Background(), func(ar arrow.Record) error {
+	sets := map[string]struct{}{}
+	err := bld.Project(logicalplan.DynCol("labels")).Execute(context.Background(), func(ar arrow.Record) error {
 		defer ar.Release()
-		parseRecordIntoSeriesSet(ar, sets)
+		for i := 0; i < int(ar.NumCols()); i++ {
+			sets[ar.ColumnName(i)] = struct{}{}
+		}
 		return nil
 	})
 	if err != nil {
 		return nil, nil, fmt.Errorf(" failed to perform labels query: %v", err)
 	}
 
-	s := flattenSeriesSets(sets)
 	names := []string{}
-	for _, s := range s.sets {
-		for _, l := range s.l {
-			names = append(names, l.Name)
-		}
+	for s := range sets {
+		names = append(names, strings.TrimPrefix(s, "labels."))
 	}
 
 	return names, nil, nil
