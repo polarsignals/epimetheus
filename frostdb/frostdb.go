@@ -96,12 +96,14 @@ func (f *FrostQuerier) LabelValues(name string, matchers ...*labels.Matcher) ([]
 	}
 
 	sets := map[uint64]*series{}
-	err := bld.Project(logicalplan.DynCol("labels")).Execute(context.Background(), func(ar arrow.Record) error {
-		defer ar.Release()
-		parseRecordIntoSeriesSet(ar, sets)
-		return nil
-	})
+	err := bld.Distinct(logicalplan.DynCol("labels")).
+		Execute(context.Background(), func(ar arrow.Record) error {
+			defer ar.Release()
+			parseRecordIntoSeriesSet(ar, sets)
+			return nil
+		})
 	if err != nil {
+		return nil, nil, fmt.Errorf(" failed to perform labels query: %v", err)
 	}
 
 	s := flattenSeriesSets(sets)
@@ -142,13 +144,13 @@ func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storag
 	}
 
 	sets := map[uint64]*series{}
-	err := bld.Project(logicalplan.DynCol("labels")).Execute(context.Background(), func(ar arrow.Record) error {
+	err := bld.Distinct(logicalplan.DynCol("labels")).Execute(context.Background(), func(ar arrow.Record) error {
 		defer ar.Release()
 		parseRecordIntoSeriesSet(ar, sets)
 		return nil
 	})
 	if err != nil {
-		fmt.Println("error: ", err)
+		return nil, nil, fmt.Errorf(" failed to perform labels query: %v", err)
 	}
 
 	s := flattenSeriesSets(sets)
