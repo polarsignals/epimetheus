@@ -96,7 +96,7 @@ func (f *FrostQuerier) LabelValues(name string, matchers ...*labels.Matcher) ([]
 	}
 
 	sets := map[uint64]*series{}
-	err := bld.Distinct(logicalplan.DynCol("labels")).
+	err := bld.Distinct(logicalplan.Col("labels."+name)).
 		Execute(context.Background(), func(ar arrow.Record) error {
 			defer ar.Release()
 			parseRecordIntoSeriesSet(ar, sets)
