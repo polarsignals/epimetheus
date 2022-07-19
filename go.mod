@@ -39,7 +39,7 @@ require (
 	github.com/oklog/run v1.1.0
 	github.com/oklog/ulid v1.3.1
 	github.com/pkg/errors v0.9.1
-	github.com/polarsignals/frostdb v0.0.0-20220715180255-c1e327da7c95
+	github.com/polarsignals/frostdb v0.0.0-20220719135628-f77c95f65cf0
 	github.com/prometheus/alertmanager v0.24.0
 	github.com/prometheus/client_golang v1.12.2
 	github.com/prometheus/client_model v0.2.0
