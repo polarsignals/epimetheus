@@ -70,33 +70,15 @@ func (f *FrostDB) Query() error {
 }
 
 func (f *FrostQuerier) LabelValues(name string, matchers ...*labels.Matcher) ([]string, storage.Warnings, error) {
-	exprs := []logicalplan.Expr{}
-	// Build a filter from matchers
-	for _, matcher := range matchers {
-		switch matcher.Type {
-		case labels.MatchEqual:
-			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).Eq(logicalplan.Literal(matcher.Value)))
-		case labels.MatchNotEqual:
-			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).NotEq(logicalplan.Literal(matcher.Value)))
-		case labels.MatchRegexp:
-			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).RegexMatch(matcher.Value))
-		case labels.MatchNotRegexp:
-			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).RegexNotMatch(matcher.Value))
-		}
-	}
-
 	engine := query.NewEngine(
 		memory.NewGoAllocator(),
 		f.db.TableProvider(),
 	)
 
-	bld := engine.ScanTable("metrics")
-	if len(exprs) != 0 {
-		bld.Filter(logicalplan.And(exprs...))
-	}
-
 	sets := map[uint64]*series{}
-	err := bld.Distinct(logicalplan.Col("labels."+name)).
+	err := engine.ScanTable("metrics").
+		Filter(promMatchersToFrostDBExprs(matchers)).
+		Distinct(logicalplan.Col("labels."+name)).
 		Execute(context.Background(), func(ar arrow.Record) error {
 			defer ar.Release()
 			parseRecordIntoSeriesSet(ar, sets)
@@ -117,9 +99,8 @@ func (f *FrostQuerier) LabelValues(name string, matchers ...*labels.Matcher) ([]
 	return names, nil, nil
 }
 
-func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storage.Warnings, error) {
+func promMatchersToFrostDBExprs(matchers []*labels.Matcher) logicalplan.Expr {
 	exprs := []logicalplan.Expr{}
-	// Build a filter from matchers
 	for _, matcher := range matchers {
 		switch matcher.Type {
 		case labels.MatchEqual:
@@ -132,25 +113,26 @@ func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storag
 			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).RegexNotMatch(matcher.Value))
 		}
 	}
+	return logicalplan.And(exprs...)
+}
 
+func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storage.Warnings, error) {
 	engine := query.NewEngine(
 		memory.NewGoAllocator(),
 		f.db.TableProvider(),
 	)
 
-	bld := engine.ScanSchema("metrics")
-	if len(exprs) != 0 {
-		bld.Filter(logicalplan.And(exprs...))
-	}
-
 	sets := map[string]struct{}{}
-	err := bld.Project(logicalplan.DynCol("labels")).Execute(context.Background(), func(ar arrow.Record) error {
-		defer ar.Release()
-		for i := 0; i < int(ar.NumCols()); i++ {
-			sets[ar.ColumnName(i)] = struct{}{}
-		}
-		return nil
-	})
+	err := engine.ScanSchema("metrics").
+		Distinct(logicalplan.Col("labels")).
+		Filter(promMatchersToFrostDBExprs(matchers)).
+		Execute(context.Background(), func(ar arrow.Record) error {
+			defer ar.Release()
+			for i := 0; i < int(ar.NumCols()); i++ {
+				sets[ar.ColumnName(i)] = struct{}{}
+			}
+			return nil
+		})
 	if err != nil {
 		return nil, nil, fmt.Errorf(" failed to perform labels query: %v", err)
 	}
@@ -166,25 +148,6 @@ func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storag
 func (f *FrostQuerier) Close() error { return nil }
 
 func (f *FrostQuerier) Select(sortSeries bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
-
-	exprs := []logicalplan.Expr{
-		logicalplan.Col("timestamp").GT(logicalplan.Literal(hints.Start)),
-		logicalplan.Col("timestamp").LT(logicalplan.Literal(hints.End)),
-	}
-	// Build a filter from matchers
-	for _, matcher := range matchers {
-		switch matcher.Type {
-		case labels.MatchEqual:
-			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).Eq(logicalplan.Literal(matcher.Value)))
-		case labels.MatchNotEqual:
-			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).NotEq(logicalplan.Literal(matcher.Value)))
-		case labels.MatchRegexp:
-			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).RegexMatch(matcher.Value))
-		case labels.MatchNotRegexp:
-			exprs = append(exprs, logicalplan.Col("labels."+matcher.Name).RegexNotMatch(matcher.Value))
-		}
-	}
-
 	engine := query.NewEngine(
 		memory.NewGoAllocator(),
 		f.db.TableProvider(),
@@ -192,7 +155,13 @@ func (f *FrostQuerier) Select(sortSeries bool, hints *storage.SelectHints, match
 
 	sets := map[uint64]*series{}
 	err := engine.ScanTable("metrics").
-		Filter(logicalplan.And(exprs...)).
+		Filter(logicalplan.And(
+			logicalplan.And(
+				logicalplan.Col("timestamp").GT(logicalplan.Literal(hints.Start)),
+				logicalplan.Col("timestamp").LT(logicalplan.Literal(hints.End)),
+			),
+			promMatchersToFrostDBExprs(matchers),
+		)).
 		Project(
 			logicalplan.DynCol("labels"),
 			logicalplan.Col("timestamp"),
