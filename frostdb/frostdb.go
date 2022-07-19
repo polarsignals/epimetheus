@@ -123,8 +123,8 @@ func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storag
 	)
 
 	sets := map[string]struct{}{}
-	err := engine.ScanSchema("metrics").
-		Distinct(logicalplan.Col("labels")).
+	err := engine.ScanTable("metrics").
+		Project(logicalplan.DynCol("labels")).
 		Filter(promMatchersToFrostDBExprs(matchers)).
 		Execute(context.Background(), func(ar arrow.Record) error {
 			defer ar.Release()
