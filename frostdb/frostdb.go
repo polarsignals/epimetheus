@@ -13,6 +13,7 @@ import (
 	"github.com/polarsignals/frostdb"
 	frost "github.com/polarsignals/frostdb"
 	"github.com/polarsignals/frostdb/dynparquet"
+	schemapb "github.com/polarsignals/frostdb/gen/proto/go/frostdb/schema/v1alpha1"
 	"github.com/polarsignals/frostdb/query"
 	"github.com/polarsignals/frostdb/query/logicalplan"
 	"github.com/prometheus/client_golang/prometheus"
@@ -41,18 +42,30 @@ type FrostQuerier struct {
 }
 
 // Open a new frostDB
-func Open(reg prometheus.Registerer, logger log.Logger) (*FrostDB, error) {
-	store := frost.New(
+func Open(dir string, reg prometheus.Registerer, logger log.Logger) (*FrostDB, error) {
+	ctx := context.Background()
+	store, err := frost.New(
+		logger,
 		reg,
-		8192,
-		10*1024*1024*1024,
+		frost.WithWAL(),
+		frost.WithStoragePath(dir),
 	)
-	db, _ := store.DB("prometheus")
-	schema := promSchema()
+	if err != nil {
+		return nil, err
+	}
+
+	err = store.ReplayWALs(ctx)
+	if err != nil {
+		return nil, err
+	}
+	db, _ := store.DB(ctx, "prometheus")
+	schema, err := promSchema()
+	if err != nil {
+		return nil, err
+	}
 	table, err := db.Table(
 		"metrics",
 		frost.NewTableConfig(schema),
-		logger,
 	)
 	if err != nil {
 		return nil, err
@@ -157,8 +170,8 @@ func (f *FrostQuerier) Select(sortSeries bool, hints *storage.SelectHints, match
 	err := engine.ScanTable("metrics").
 		Filter(logicalplan.And(
 			logicalplan.And(
-				logicalplan.Col("timestamp").GT(logicalplan.Literal(hints.Start)),
-				logicalplan.Col("timestamp").LT(logicalplan.Literal(hints.End)),
+				logicalplan.Col("timestamp").Gt(logicalplan.Literal(hints.Start)),
+				logicalplan.Col("timestamp").Lt(logicalplan.Literal(hints.End)),
 			),
 			promMatchersToFrostDBExprs(matchers),
 		)).
@@ -242,27 +255,40 @@ func (f *FrostDB) ChunkQuerier(ctx context.Context, mint, maxt int64) (storage.C
 	return nil, nil
 }
 
-func promSchema() *dynparquet.Schema {
-	return dynparquet.NewSchema(
-		"metrics_schema",
-		[]dynparquet.ColumnDefinition{{
-			Name:          "labels",
-			StorageLayout: parquet.Encoded(parquet.String(), &parquet.RLEDictionary),
-			Dynamic:       true,
+func promSchema() (*dynparquet.Schema, error) {
+	return dynparquet.SchemaFromDefinition(&schemapb.Schema{
+		Name: "metrics_schema",
+		Columns: []*schemapb.Column{{
+			Name: "labels",
+			StorageLayout: &schemapb.StorageLayout{
+				Type:     schemapb.StorageLayout_TYPE_STRING,
+				Encoding: schemapb.StorageLayout_ENCODING_RLE_DICTIONARY,
+				Nullable: true,
+			},
+			Dynamic: true,
 		}, {
-			Name:          "timestamp",
-			StorageLayout: parquet.Int(64),
-			Dynamic:       false,
+			Name: "timestamp",
+			StorageLayout: &schemapb.StorageLayout{
+				Type: schemapb.StorageLayout_TYPE_INT64,
+			},
+			Dynamic: false,
 		}, {
-			Name:          "value",
-			StorageLayout: parquet.Leaf(parquet.DoubleType),
-			Dynamic:       false,
+			Name: "value",
+			StorageLayout: &schemapb.StorageLayout{
+				Type: schemapb.StorageLayout_TYPE_DOUBLE,
+			},
+			Dynamic: false,
 		}},
-		[]dynparquet.SortingColumn{
-			dynparquet.NullsFirst(dynparquet.Ascending("labels")),
-			dynparquet.Ascending("timestamp"),
+		SortingColumns: []*schemapb.SortingColumn{{
+			Name:       "labels",
+			NullsFirst: true,
+			Direction:  schemapb.SortingColumn_DIRECTION_ASCENDING,
 		},
-	)
+			{
+				Name:      "timestamp",
+				Direction: schemapb.SortingColumn_DIRECTION_ASCENDING,
+			}},
+	})
 }
 
 type arrowSeriesSet struct {
