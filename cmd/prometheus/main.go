@@ -1137,7 +1137,7 @@ func main() {
 }
 
 func openDBWithMetrics(dir string, logger log.Logger, reg prometheus.Registerer, opts *tsdb.Options, stats *tsdb.DBStats) (storage.Storage, error) {
-	db, err := frostdb.Open(reg, logger)
+	db, err := frostdb.Open(dir, reg, log.With(logger, "component", "frostdb"))
 	/*
 		db, err := tsdb.Open(
 			dir,
