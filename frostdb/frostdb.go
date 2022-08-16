@@ -22,6 +22,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/segmentio/parquet-go"
+	"github.com/thanos-io/objstore/providers/filesystem"
 )
 
 type FrostDB struct {
@@ -43,12 +44,14 @@ type FrostQuerier struct {
 
 // Open a new frostDB
 func Open(dir string, reg prometheus.Registerer, logger log.Logger) (*FrostDB, error) {
+	bucket, err := filesystem.NewBucket(dir)
 	ctx := context.Background()
 	store, err := frost.New(
 		logger,
 		reg,
 		frost.WithWAL(),
 		frost.WithStoragePath(dir),
+		frost.WithBucketStorage(bucket),
 	)
 	if err != nil {
 		return nil, err
