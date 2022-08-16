@@ -158,7 +158,9 @@ func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storag
 	return names, nil, nil
 }
 
-func (f *FrostQuerier) Close() error { return nil }
+func (f *FrostQuerier) Close() error {
+	return nil
+}
 
 func (f *FrostQuerier) Select(sortSeries bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
 	engine := query.NewEngine(
@@ -201,7 +203,7 @@ func (f *FrostDB) StartTime() (int64, error) {
 }
 
 func (f *FrostDB) Close() error {
-	return nil
+	return f.store.Close()
 }
 
 func (f *FrostDB) Appender(ctx context.Context) storage.Appender {
