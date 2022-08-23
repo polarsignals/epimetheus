@@ -22,6 +22,7 @@ import (
 	"github.com/prometheus/prometheus/storage"
 	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/segmentio/parquet-go"
+	"github.com/thanos-io/objstore/providers/filesystem"
 )
 
 type FrostDB struct {
@@ -43,12 +44,14 @@ type FrostQuerier struct {
 
 // Open a new frostDB
 func Open(dir string, reg prometheus.Registerer, logger log.Logger) (*FrostDB, error) {
+	bucket, err := filesystem.NewBucket(dir)
 	ctx := context.Background()
 	store, err := frost.New(
 		logger,
 		reg,
 		frost.WithWAL(),
 		frost.WithStoragePath(dir),
+		frost.WithBucketStorage(bucket),
 	)
 	if err != nil {
 		return nil, err
@@ -158,7 +161,9 @@ func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storag
 	return names, nil, nil
 }
 
-func (f *FrostQuerier) Close() error { return nil }
+func (f *FrostQuerier) Close() error {
+	return nil
+}
 
 func (f *FrostQuerier) Select(sortSeries bool, hints *storage.SelectHints, matchers ...*labels.Matcher) storage.SeriesSet {
 	engine := query.NewEngine(
@@ -201,7 +206,7 @@ func (f *FrostDB) StartTime() (int64, error) {
 }
 
 func (f *FrostDB) Close() error {
-	return nil
+	return f.store.Close()
 }
 
 func (f *FrostDB) Appender(ctx context.Context) storage.Appender {
