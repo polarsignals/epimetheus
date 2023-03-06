@@ -6,9 +6,9 @@ import (
 	"math"
 	"strings"
 
-	"github.com/apache/arrow/go/v8/arrow"
-	"github.com/apache/arrow/go/v8/arrow/array"
-	"github.com/apache/arrow/go/v8/arrow/memory"
+	"github.com/apache/arrow/go/v10/arrow"
+	"github.com/apache/arrow/go/v10/arrow/array"
+	"github.com/apache/arrow/go/v10/arrow/memory"
 	"github.com/go-kit/log"
 	"github.com/polarsignals/frostdb"
 	frost "github.com/polarsignals/frostdb"
@@ -17,12 +17,15 @@ import (
 	"github.com/polarsignals/frostdb/query"
 	"github.com/polarsignals/frostdb/query/logicalplan"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/prometheus/prometheus/model/exemplar"
-	"github.com/prometheus/prometheus/model/labels"
-	"github.com/prometheus/prometheus/storage"
-	"github.com/prometheus/prometheus/tsdb/chunkenc"
 	"github.com/segmentio/parquet-go"
 	"github.com/thanos-io/objstore/providers/filesystem"
+
+	"github.com/prometheus/prometheus/model/exemplar"
+	"github.com/prometheus/prometheus/model/histogram"
+	"github.com/prometheus/prometheus/model/labels"
+	"github.com/prometheus/prometheus/model/metadata"
+	"github.com/prometheus/prometheus/storage"
+	"github.com/prometheus/prometheus/tsdb/chunkenc"
 )
 
 type FrostDB struct {
@@ -38,6 +41,14 @@ type FrostAppender struct {
 	tableRef *frostdb.Table
 }
 
+func (f *FrostAppender) AppendHistogram(ref storage.SeriesRef, l labels.Labels, t int64, h *histogram.Histogram, fh *histogram.FloatHistogram) (storage.SeriesRef, error) {
+	panic("histogram not supported")
+}
+
+func (f *FrostAppender) UpdateMetadata(ref storage.SeriesRef, l labels.Labels, m metadata.Metadata) (storage.SeriesRef, error) {
+	panic("metadata not supported")
+}
+
 type FrostQuerier struct {
 	*FrostDB
 }
@@ -47,8 +58,8 @@ func Open(dir string, reg prometheus.Registerer, logger log.Logger) (*FrostDB, e
 	bucket, err := filesystem.NewBucket(dir)
 	ctx := context.Background()
 	store, err := frost.New(
-		logger,
-		reg,
+		frost.WithLogger(logger),
+		frost.WithRegistry(reg),
 		frost.WithWAL(),
 		frost.WithStoragePath(dir),
 		frost.WithBucketStorage(bucket),
@@ -67,7 +78,7 @@ func Open(dir string, reg prometheus.Registerer, logger log.Logger) (*FrostDB, e
 		return nil, err
 	}
 	table, err := db.Table(
-		"metrics",
+		tableMetrics,
 		frost.NewTableConfig(schema),
 	)
 	if err != nil {
@@ -92,10 +103,10 @@ func (f *FrostQuerier) LabelValues(name string, matchers ...*labels.Matcher) ([]
 	)
 
 	sets := map[uint64]*series{}
-	err := engine.ScanTable("metrics").
+	err := engine.ScanTable(tableMetrics).
 		Filter(promMatchersToFrostDBExprs(matchers)).
 		Distinct(logicalplan.Col("labels."+name)).
-		Execute(context.Background(), func(ar arrow.Record) error {
+		Execute(context.Background(), func(ctx context.Context, ar arrow.Record) error {
 			defer ar.Release()
 			parseRecordIntoSeriesSet(ar, sets)
 			return nil
@@ -105,7 +116,7 @@ func (f *FrostQuerier) LabelValues(name string, matchers ...*labels.Matcher) ([]
 	}
 
 	s := flattenSeriesSets(sets)
-	names := []string{}
+	names := make([]string, 0, len(s.sets))
 	for _, s := range s.sets {
 		for _, l := range s.l {
 			names = append(names, l.Value)
@@ -139,10 +150,10 @@ func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storag
 	)
 
 	sets := map[string]struct{}{}
-	err := engine.ScanTable("metrics").
-		Project(logicalplan.DynCol("labels")).
+	err := engine.ScanTable(tableMetrics).
+		Project(logicalplan.DynCol(columnLabels)).
 		Filter(promMatchersToFrostDBExprs(matchers)).
-		Execute(context.Background(), func(ar arrow.Record) error {
+		Execute(context.Background(), func(ctx context.Context, ar arrow.Record) error {
 			defer ar.Release()
 			for i := 0; i < int(ar.NumCols()); i++ {
 				sets[ar.ColumnName(i)] = struct{}{}
@@ -172,20 +183,20 @@ func (f *FrostQuerier) Select(sortSeries bool, hints *storage.SelectHints, match
 	)
 
 	sets := map[uint64]*series{}
-	err := engine.ScanTable("metrics").
+	err := engine.ScanTable(tableMetrics).
 		Filter(logicalplan.And(
 			logicalplan.And(
-				logicalplan.Col("timestamp").Gt(logicalplan.Literal(hints.Start)),
-				logicalplan.Col("timestamp").Lt(logicalplan.Literal(hints.End)),
+				logicalplan.Col(columnTimestamp).Gt(logicalplan.Literal(hints.Start)),
+				logicalplan.Col(columnTimestamp).Lt(logicalplan.Literal(hints.End)),
 			),
 			promMatchersToFrostDBExprs(matchers),
 		)).
 		Project(
-			logicalplan.DynCol("labels"),
-			logicalplan.Col("timestamp"),
-			logicalplan.Col("value"),
+			logicalplan.DynCol(columnLabels),
+			logicalplan.Col(columnTimestamp),
+			logicalplan.Col(columnValue),
 		).
-		Execute(context.Background(), func(ar arrow.Record) error {
+		Execute(context.Background(), func(ctx context.Context, ar arrow.Record) error {
 			defer ar.Release()
 			parseRecordIntoSeriesSet(ar, sets)
 			return nil
@@ -260,11 +271,18 @@ func (f *FrostDB) ChunkQuerier(ctx context.Context, mint, maxt int64) (storage.C
 	return nil, nil
 }
 
+const (
+	tableMetrics    = "metrics"
+	columnLabels    = "labels"
+	columnTimestamp = "timestamp"
+	columnValue     = "value"
+)
+
 func promSchema() (*dynparquet.Schema, error) {
 	return dynparquet.SchemaFromDefinition(&schemapb.Schema{
 		Name: "metrics_schema",
 		Columns: []*schemapb.Column{{
-			Name: "labels",
+			Name: columnLabels,
 			StorageLayout: &schemapb.StorageLayout{
 				Type:     schemapb.StorageLayout_TYPE_STRING,
 				Encoding: schemapb.StorageLayout_ENCODING_RLE_DICTIONARY,
@@ -272,27 +290,29 @@ func promSchema() (*dynparquet.Schema, error) {
 			},
 			Dynamic: true,
 		}, {
-			Name: "timestamp",
+			Name: columnTimestamp,
 			StorageLayout: &schemapb.StorageLayout{
 				Type: schemapb.StorageLayout_TYPE_INT64,
 			},
 			Dynamic: false,
 		}, {
-			Name: "value",
+			Name: columnValue,
 			StorageLayout: &schemapb.StorageLayout{
 				Type: schemapb.StorageLayout_TYPE_DOUBLE,
 			},
 			Dynamic: false,
 		}},
-		SortingColumns: []*schemapb.SortingColumn{{
-			Name:       "labels",
-			NullsFirst: true,
-			Direction:  schemapb.SortingColumn_DIRECTION_ASCENDING,
-		},
+		SortingColumns: []*schemapb.SortingColumn{
 			{
-				Name:      "timestamp",
+				Name:       columnLabels,
+				NullsFirst: true,
+				Direction:  schemapb.SortingColumn_DIRECTION_ASCENDING,
+			},
+			{
+				Name:      columnTimestamp,
 				Direction: schemapb.SortingColumn_DIRECTION_ASCENDING,
-			}},
+			},
+		},
 	})
 }
 
@@ -304,6 +324,18 @@ type arrowSeriesSet struct {
 type arrowSeries struct {
 	index int
 	*series
+}
+
+func (a *arrowSeries) AtHistogram() (int64, *histogram.Histogram) {
+	panic("histogram not supported")
+}
+
+func (a *arrowSeries) AtFloatHistogram() (int64, *histogram.FloatHistogram) {
+	panic("histogram not supported")
+}
+
+func (a *arrowSeries) AtT() int64 {
+	return a.series.ts[a.index]
 }
 
 func (a *arrowSeriesSet) Next() bool {
@@ -322,22 +354,27 @@ func (a *arrowSeriesSet) Err() error                 { return nil }
 func (a *arrowSeriesSet) Warnings() storage.Warnings { return nil }
 
 func (a *arrowSeries) Labels() labels.Labels { return a.l }
-func (a *arrowSeries) Iterator() chunkenc.Iterator {
+
+func (a *arrowSeries) Iterator(iterator chunkenc.Iterator) chunkenc.Iterator {
+	// TODO: Use iterator here?
 	return a
 }
 
-func (a *arrowSeries) Next() bool {
+func (a *arrowSeries) Next() chunkenc.ValueType {
 	a.index++
-	return a.index < len(a.ts)
+	if a.index < len(a.ts) {
+		return chunkenc.ValFloat
+	}
+	return chunkenc.ValNone
 }
 
-func (a *arrowSeries) Seek(i int64) bool {
+func (a *arrowSeries) Seek(i int64) chunkenc.ValueType {
 	for ; a.index < len(a.series.ts); a.index++ {
 		if a.series.ts[a.index] >= i {
-			return true
+			return chunkenc.ValFloat
 		}
 	}
-	return false
+	return chunkenc.ValNone
 }
 
 func (a *arrowSeries) At() (int64, float64) {
@@ -377,7 +414,6 @@ type series struct {
 }
 
 func parseRecord(r arrow.Record) map[uint64]*series {
-
 	seriesset := map[uint64]*series{}
 
 	for i := 0; i < int(r.NumRows()); i++ {
@@ -385,18 +421,27 @@ func parseRecord(r arrow.Record) map[uint64]*series {
 		var ts int64
 		var v float64
 		for j := 0; j < int(r.NumCols()); j++ {
+			columnName := r.ColumnName(j)
 			switch {
-			case r.ColumnName(j) == "timestamp":
+			case columnName == columnTimestamp:
 				ts = r.Column(j).(*array.Int64).Value(i)
-			case r.ColumnName(j) == "value":
+			case columnName == columnValue:
 				v = r.Column(j).(*array.Float64).Value(i)
 			default:
-				name := strings.TrimPrefix(r.ColumnName(j), "labels.")
-				value := r.Column(j).(*array.Binary).Value(i)
+				name := strings.TrimPrefix(columnName, "labels.")
+				nameColumn, err := DictionaryFromRecord(r, columnName)
+				if err != nil {
+					continue
+				}
+				if nameColumn.IsNull(i) {
+					continue
+				}
+
+				value := StringValueFromDictionary(nameColumn, i)
 				if string(value) != "" {
 					lbls = append(lbls, labels.Label{
 						Name:  name,
-						Value: string(value),
+						Value: value,
 					})
 				}
 			}
@@ -415,6 +460,31 @@ func parseRecord(r arrow.Record) map[uint64]*series {
 	}
 
 	return seriesset
+}
+
+func DictionaryFromRecord(ar arrow.Record, name string) (*array.Dictionary, error) {
+	indices := ar.Schema().FieldIndices(name)
+	if len(indices) != 1 {
+		return nil, fmt.Errorf("expected 1 column named %q, got %d", name, len(indices))
+	}
+
+	col, ok := ar.Column(indices[0]).(*array.Dictionary)
+	if !ok {
+		return nil, fmt.Errorf("expected column %q to be a dictionary column, got %T", name, ar.Column(indices[0]))
+	}
+
+	return col, nil
+}
+
+func StringValueFromDictionary(arr *array.Dictionary, i int) string {
+	switch dict := arr.Dictionary().(type) {
+	case *array.Binary:
+		return string(dict.Value(arr.GetValueIndex(i)))
+	case *array.String:
+		return dict.Value(arr.GetValueIndex(i))
+	default:
+		panic(fmt.Sprintf("unsupported dictionary type: %T", dict))
+	}
 }
 
 // merge's a,b into an ordered list, maintains this same order for the floats
