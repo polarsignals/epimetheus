@@ -228,8 +228,45 @@ func (f *FrostDB) Appender(ctx context.Context) storage.Appender {
 	}
 }
 
+const arrowIngest = true
+
 // Append writes immediately to the frostdb. Rollback and Commit are nop
 func (f *FrostAppender) Append(ref storage.SeriesRef, l labels.Labels, t int64, v float64) (storage.SeriesRef, error) {
+	// TODO: Move this somewhere else
+	mem := memory.NewGoAllocator()
+	if arrowIngest {
+		// +2 for timestamp and value
+		fields := make([]arrow.Field, 0, len(l)+2)
+		arrays := make([]arrow.Array, 0, len(l)+2)
+
+		for _, k := range l {
+			fields = append(fields, arrow.Field{Name: "labels." + k.Name, Type: arrow.BinaryTypes.String})
+			bl := array.NewBinaryBuilder(mem, arrow.BinaryTypes.String)
+			bl.AppendString(k.Value)
+			arrays = append(arrays, bl.NewArray())
+		}
+
+		fields = append(fields, arrow.Field{Name: columnTimestamp, Type: arrow.PrimitiveTypes.Int64})
+		bt := array.NewInt64Builder(mem)
+		bt.Append(t)
+		arrays = append(arrays, bt.NewArray())
+
+		fields = append(fields, arrow.Field{Name: columnValue, Type: arrow.PrimitiveTypes.Float64})
+		bv := array.NewFloat64Builder(mem)
+		bv.Append(v)
+		arrays = append(arrays, bv.NewArray())
+
+		schema := arrow.NewSchema(fields, nil)
+		r := array.NewRecord(schema, arrays, 1)
+		defer r.Release()
+
+		// TODO: These inserts should be batched
+		_, err := f.tableRef.InsertRecord(f.ctx, r)
+		if err != nil {
+			return 0, err
+		}
+	}
+
 	dynamicColumnNames := make([]string, 0, len(l))
 	row := make([]parquet.Value, 0, len(l))
 	for i, k := range l {
