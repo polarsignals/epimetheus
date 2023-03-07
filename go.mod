@@ -7,6 +7,7 @@ require (
 	github.com/Azure/go-autorest/autorest v0.11.28
 	github.com/Azure/go-autorest/autorest/adal v0.9.22
 	github.com/alecthomas/units v0.0.0-20211218093645-b94a6e3cc137
+	github.com/apache/arrow/go/v10 v10.0.1
 	github.com/apache/arrow/go/v8 v8.0.0-20220414050214-b61fb727fcc9
 	github.com/aws/aws-sdk-go v1.44.207
 	github.com/cespare/xxhash/v2 v2.2.0
@@ -34,7 +35,7 @@ require (
 	github.com/json-iterator/go v1.1.12
 	github.com/kolo/xmlrpc v0.0.0-20220921171641-a4b6fa1dd06b
 	github.com/linode/linodego v1.12.0
-	github.com/miekg/dns v1.1.50
+	github.com/miekg/dns v1.1.51
 	github.com/mwitkow/go-conntrack v0.0.0-20190716064945-2f068394615f
 	github.com/oklog/run v1.1.0
 	github.com/oklog/ulid v1.3.1
@@ -104,7 +105,6 @@ require (
 	github.com/RoaringBitmap/roaring v0.9.4 // indirect
 	github.com/alecthomas/template v0.0.0-20190718012654-fb15b899a751 // indirect
 	github.com/andybalholm/brotli v1.0.4 // indirect
-	github.com/apache/arrow/go/v10 v10.0.1 // indirect
 	github.com/apache/thrift v0.16.0 // indirect
 	github.com/armon/go-metrics v0.3.10 // indirect
 	github.com/asaskevich/govalidator v0.0.0-20210307081110-f21760c49a8d // indirect
