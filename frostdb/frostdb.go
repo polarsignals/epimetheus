@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"math"
+	"sort"
 	"strings"
 
 	"github.com/apache/arrow/go/v10/arrow"
@@ -17,8 +18,8 @@ import (
 	"github.com/polarsignals/frostdb/query"
 	"github.com/polarsignals/frostdb/query/logicalplan"
 	"github.com/prometheus/client_golang/prometheus"
-	"github.com/segmentio/parquet-go"
 	"github.com/thanos-io/objstore/providers/filesystem"
+	"golang.org/x/exp/maps"
 
 	"github.com/prometheus/prometheus/model/exemplar"
 	"github.com/prometheus/prometheus/model/histogram"
@@ -39,6 +40,8 @@ type FrostAppender struct {
 	ctx      context.Context
 	schema   *dynparquet.Schema
 	tableRef *frostdb.Table
+	mem      memory.Allocator
+	buffer   *MetricBuffer
 }
 
 func (f *FrostAppender) AppendHistogram(ref storage.SeriesRef, l labels.Labels, t int64, h *histogram.Histogram, fh *histogram.FloatHistogram) (storage.SeriesRef, error) {
@@ -225,81 +228,94 @@ func (f *FrostDB) Appender(ctx context.Context) storage.Appender {
 		ctx:      ctx,
 		schema:   f.schema,
 		tableRef: f.table,
+		mem:      memory.NewGoAllocator(),
 	}
 }
 
-const arrowIngest = true
+type MetricBuffer struct {
+	columns map[string]struct{}
+	samples []*MetricSample
+}
+
+type MetricSample struct {
+	l labels.Labels
+	t int64
+	v float64
+}
 
 // Append writes immediately to the frostdb. Rollback and Commit are nop
 func (f *FrostAppender) Append(ref storage.SeriesRef, l labels.Labels, t int64, v float64) (storage.SeriesRef, error) {
-	// TODO: Move this somewhere else
-	mem := memory.NewGoAllocator()
-	if arrowIngest {
-		// +2 for timestamp and value
-		fields := make([]arrow.Field, 0, len(l)+2)
-		arrays := make([]arrow.Array, 0, len(l)+2)
-
-		for _, k := range l {
-			fields = append(fields, arrow.Field{Name: "labels." + k.Name, Type: arrow.BinaryTypes.String})
-			bl := array.NewBinaryBuilder(mem, arrow.BinaryTypes.String)
-			bl.AppendString(k.Value)
-			arrays = append(arrays, bl.NewArray())
-		}
-
-		fields = append(fields, arrow.Field{Name: columnTimestamp, Type: arrow.PrimitiveTypes.Int64})
-		bt := array.NewInt64Builder(mem)
-		bt.Append(t)
-		arrays = append(arrays, bt.NewArray())
-
-		fields = append(fields, arrow.Field{Name: columnValue, Type: arrow.PrimitiveTypes.Float64})
-		bv := array.NewFloat64Builder(mem)
-		bv.Append(v)
-		arrays = append(arrays, bv.NewArray())
-
-		schema := arrow.NewSchema(fields, nil)
-		r := array.NewRecord(schema, arrays, 1)
-		defer r.Release()
-
-		// TODO: These inserts should be batched
-		_, err := f.tableRef.InsertRecord(f.ctx, r)
-		if err != nil {
-			return 0, err
+	if f.buffer == nil {
+		f.buffer = &MetricBuffer{
+			columns: make(map[string]struct{}),
+			samples: make([]*MetricSample, 0, 64),
 		}
 	}
 
-	dynamicColumnNames := make([]string, 0, len(l))
-	row := make([]parquet.Value, 0, len(l))
-	for i, k := range l {
-		dynamicColumnNames = append(dynamicColumnNames, k.Name)
-		row = append(row, parquet.ValueOf(k.Value).Level(0, 1, i))
+	for _, l := range l {
+		f.buffer.columns[l.Name] = struct{}{}
 	}
 
-	buf, err := f.schema.NewBuffer(map[string][]string{
-		"labels": dynamicColumnNames,
-	})
-	if err != nil {
-		return 0, err
-	}
-
-	// Add timestamp and value to row
-	row = append(row, parquet.ValueOf(t).Level(0, 0, len(l)))
-	row = append(row, parquet.ValueOf(v).Level(0, 0, len(l)+1))
-
-	_, err = buf.WriteRows([]parquet.Row{row})
-	if err != nil {
-		return 0, err
-	}
-
-	_, err = f.tableRef.InsertBuffer(f.ctx, buf)
-	if err != nil {
-		return 0, err
-	}
+	f.buffer.samples = append(f.buffer.samples, &MetricSample{l: l, t: t, v: v})
 
 	return 0, nil
 }
 
+func (f *FrostAppender) Commit() error {
+	fields := make([]arrow.Field, 0, len(f.buffer.columns)+2)
+	builders := make([]*array.BinaryBuilder, 0, len(f.buffer.columns))
+
+	keys := maps.Keys(f.buffer.columns)
+	sort.Strings(keys)
+
+	for _, k := range keys {
+		fields = append(fields, arrow.Field{Name: "labels." + k, Type: arrow.BinaryTypes.String})
+		builders = append(builders, array.NewBinaryBuilder(f.mem, arrow.BinaryTypes.String))
+	}
+
+	fields = append(fields, arrow.Field{Name: columnTimestamp, Type: arrow.PrimitiveTypes.Int64})
+	bt := array.NewInt64Builder(f.mem)
+
+	fields = append(fields, arrow.Field{Name: columnValue, Type: arrow.PrimitiveTypes.Float64})
+	bv := array.NewFloat64Builder(f.mem)
+
+	for _, s := range f.buffer.samples {
+		for i, k := range keys {
+			b := builders[i]
+			v := s.l.Get(k)
+			if v != "" {
+				b.AppendString(v)
+			} else {
+				b.AppendNull()
+			}
+		}
+		bt.Append(s.t)
+		bv.Append(s.v)
+	}
+
+	arrays := make([]arrow.Array, 0, len(f.buffer.columns)+2)
+	for _, b := range builders {
+		arrays = append(arrays, b.NewArray())
+	}
+	arrays = append(arrays, bt.NewArray())
+	arrays = append(arrays, bv.NewArray())
+
+	schema := arrow.NewSchema(fields, nil)
+	r := array.NewRecord(schema, arrays, int64(len(f.buffer.samples)))
+	defer r.Release()
+
+	_, err := f.tableRef.InsertRecord(f.ctx, r)
+	if err != nil {
+		return err
+	}
+
+	f.buffer.columns = make(map[string]struct{})
+	f.buffer.samples = f.buffer.samples[:0]
+	return nil
+}
+
 func (f *FrostAppender) Rollback() error { return nil }
-func (f *FrostAppender) Commit() error   { return nil }
+
 func (f *FrostAppender) AppendExemplar(ref storage.SeriesRef, l labels.Labels, e exemplar.Exemplar) (storage.SeriesRef, error) {
 	return 0, nil
 }
