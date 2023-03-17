@@ -71,17 +71,13 @@ func Open(dir string, reg prometheus.Registerer, logger log.Logger) (*FrostDB, e
 		return nil, err
 	}
 
-	err = store.ReplayWALs(ctx)
-	if err != nil {
-		return nil, err
-	}
 	db, _ := store.DB(ctx, "prometheus")
-	schema, err := promSchema()
+	schema, err := SchemaMetrics()
 	if err != nil {
 		return nil, err
 	}
 	table, err := db.Table(
-		tableMetrics,
+		TableMetrics,
 		frost.NewTableConfig(schema),
 	)
 	if err != nil {
@@ -106,7 +102,7 @@ func (f *FrostQuerier) LabelValues(name string, matchers ...*labels.Matcher) ([]
 	)
 
 	sets := map[uint64]*series{}
-	err := engine.ScanTable(tableMetrics).
+	err := engine.ScanTable(TableMetrics).
 		Filter(promMatchersToFrostDBExprs(matchers)).
 		Distinct(logicalplan.Col("labels."+name)).
 		Execute(context.Background(), func(ctx context.Context, ar arrow.Record) error {
@@ -153,8 +149,8 @@ func (f *FrostQuerier) LabelNames(matchers ...*labels.Matcher) ([]string, storag
 	)
 
 	sets := map[string]struct{}{}
-	err := engine.ScanTable(tableMetrics).
-		Project(logicalplan.DynCol(columnLabels)).
+	err := engine.ScanTable(TableMetrics).
+		Project(logicalplan.DynCol(ColumnLabels)).
 		Filter(promMatchersToFrostDBExprs(matchers)).
 		Execute(context.Background(), func(ctx context.Context, ar arrow.Record) error {
 			defer ar.Release()
@@ -186,18 +182,18 @@ func (f *FrostQuerier) Select(sortSeries bool, hints *storage.SelectHints, match
 	)
 
 	sets := map[uint64]*series{}
-	err := engine.ScanTable(tableMetrics).
+	err := engine.ScanTable(TableMetrics).
 		Filter(logicalplan.And(
 			logicalplan.And(
-				logicalplan.Col(columnTimestamp).Gt(logicalplan.Literal(hints.Start)),
-				logicalplan.Col(columnTimestamp).Lt(logicalplan.Literal(hints.End)),
+				logicalplan.Col(ColumnTimestamp).Gt(logicalplan.Literal(hints.Start)),
+				logicalplan.Col(ColumnTimestamp).Lt(logicalplan.Literal(hints.End)),
 			),
 			promMatchersToFrostDBExprs(matchers),
 		)).
 		Project(
-			logicalplan.DynCol(columnLabels),
-			logicalplan.Col(columnTimestamp),
-			logicalplan.Col(columnValue),
+			logicalplan.DynCol(ColumnLabels),
+			logicalplan.Col(ColumnTimestamp),
+			logicalplan.Col(ColumnValue),
 		).
 		Execute(context.Background(), func(ctx context.Context, ar arrow.Record) error {
 			defer ar.Release()
@@ -262,46 +258,16 @@ func (f *FrostAppender) Append(ref storage.SeriesRef, l labels.Labels, t int64, 
 }
 
 func (f *FrostAppender) Commit() error {
-	fields := make([]arrow.Field, 0, len(f.buffer.columns)+2)
-	builders := make([]*array.BinaryBuilder, 0, len(f.buffer.columns))
-
 	keys := maps.Keys(f.buffer.columns)
 	sort.Strings(keys)
 
-	for _, k := range keys {
-		fields = append(fields, arrow.Field{Name: "labels." + k, Type: arrow.BinaryTypes.String})
-		builders = append(builders, array.NewBinaryBuilder(f.mem, arrow.BinaryTypes.String))
-	}
-
-	fields = append(fields, arrow.Field{Name: columnTimestamp, Type: arrow.PrimitiveTypes.Int64})
-	bt := array.NewInt64Builder(f.mem)
-
-	fields = append(fields, arrow.Field{Name: columnValue, Type: arrow.PrimitiveTypes.Float64})
-	bv := array.NewFloat64Builder(f.mem)
+	rb := NewRecordBuilder(f.mem, keys)
 
 	for _, s := range f.buffer.samples {
-		for i, k := range keys {
-			b := builders[i]
-			v := s.l.Get(k)
-			if v != "" {
-				b.AppendString(v)
-			} else {
-				b.AppendNull()
-			}
-		}
-		bt.Append(s.t)
-		bv.Append(s.v)
+		rb.Append(s.l, s.t, s.v)
 	}
 
-	arrays := make([]arrow.Array, 0, len(f.buffer.columns)+2)
-	for _, b := range builders {
-		arrays = append(arrays, b.NewArray())
-	}
-	arrays = append(arrays, bt.NewArray())
-	arrays = append(arrays, bv.NewArray())
-
-	schema := arrow.NewSchema(fields, nil)
-	r := array.NewRecord(schema, arrays, int64(len(f.buffer.samples)))
+	r := rb.NewRecord()
 	defer r.Release()
 
 	_, err := f.tableRef.InsertRecord(f.ctx, r)
@@ -309,6 +275,7 @@ func (f *FrostAppender) Commit() error {
 		return err
 	}
 
+	// reset buffer
 	f.buffer.columns = make(map[string]struct{})
 	f.buffer.samples = f.buffer.samples[:0]
 	return nil
@@ -325,17 +292,17 @@ func (f *FrostDB) ChunkQuerier(ctx context.Context, mint, maxt int64) (storage.C
 }
 
 const (
-	tableMetrics    = "metrics"
-	columnLabels    = "labels"
-	columnTimestamp = "timestamp"
-	columnValue     = "value"
+	TableMetrics    = "metrics"
+	ColumnLabels    = "labels"
+	ColumnTimestamp = "timestamp"
+	ColumnValue     = "value"
 )
 
-func promSchema() (*dynparquet.Schema, error) {
+func SchemaMetrics() (*dynparquet.Schema, error) {
 	return dynparquet.SchemaFromDefinition(&schemapb.Schema{
 		Name: "metrics_schema",
 		Columns: []*schemapb.Column{{
-			Name: columnLabels,
+			Name: ColumnLabels,
 			StorageLayout: &schemapb.StorageLayout{
 				Type:     schemapb.StorageLayout_TYPE_STRING,
 				Encoding: schemapb.StorageLayout_ENCODING_RLE_DICTIONARY,
@@ -343,26 +310,28 @@ func promSchema() (*dynparquet.Schema, error) {
 			},
 			Dynamic: true,
 		}, {
-			Name: columnTimestamp,
+			Name: ColumnTimestamp,
 			StorageLayout: &schemapb.StorageLayout{
-				Type: schemapb.StorageLayout_TYPE_INT64,
+				Type:        schemapb.StorageLayout_TYPE_INT64,
+				Compression: schemapb.StorageLayout_COMPRESSION_ZSTD,
 			},
 			Dynamic: false,
 		}, {
-			Name: columnValue,
+			Name: ColumnValue,
 			StorageLayout: &schemapb.StorageLayout{
-				Type: schemapb.StorageLayout_TYPE_DOUBLE,
+				Type:        schemapb.StorageLayout_TYPE_DOUBLE,
+				Compression: schemapb.StorageLayout_COMPRESSION_ZSTD,
 			},
 			Dynamic: false,
 		}},
 		SortingColumns: []*schemapb.SortingColumn{
 			{
-				Name:       columnLabels,
+				Name:       ColumnLabels,
 				NullsFirst: true,
 				Direction:  schemapb.SortingColumn_DIRECTION_ASCENDING,
 			},
 			{
-				Name:      columnTimestamp,
+				Name:      ColumnTimestamp,
 				Direction: schemapb.SortingColumn_DIRECTION_ASCENDING,
 			},
 		},
@@ -476,9 +445,9 @@ func parseRecord(r arrow.Record) map[uint64]*series {
 		for j := 0; j < int(r.NumCols()); j++ {
 			columnName := r.ColumnName(j)
 			switch {
-			case columnName == columnTimestamp:
+			case columnName == ColumnTimestamp:
 				ts = r.Column(j).(*array.Int64).Value(i)
-			case columnName == columnValue:
+			case columnName == ColumnValue:
 				v = r.Column(j).(*array.Float64).Value(i)
 			default:
 				name := strings.TrimPrefix(columnName, "labels.")
