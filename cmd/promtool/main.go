@@ -190,6 +190,10 @@ func main() {
 	analyzeLimit := tsdbAnalyzeCmd.Flag("limit", "How many items to show in each list.").Default("20").Int()
 	analyzeRunExtended := tsdbAnalyzeCmd.Flag("extended", "Run extended analysis.").Bool()
 
+	tsdbFrostDBCmd := tsdbCmd.Command("convert", "Convert a Block to a FrostDB parquet file.")
+	tsdbFrostDBAnalyzePath := tsdbFrostDBCmd.Arg("db path", "Database path (default is "+defaultDBPath+").").Default(defaultDBPath).String()
+	tsdbFrostDBAnalyzeBlockID := tsdbFrostDBCmd.Arg("block id", "Block to analyze (default is the last block).").String()
+
 	tsdbListCmd := tsdbCmd.Command("list", "List tsdb blocks.")
 	listHumanReadable := tsdbListCmd.Flag("human-readable", "Print human readable values.").Short('r').Bool()
 	listPath := tsdbListCmd.Arg("db path", "Database path (default is "+defaultDBPath+").").Default(defaultDBPath).String()
@@ -320,6 +324,9 @@ func main() {
 
 	case tsdbListCmd.FullCommand():
 		os.Exit(checkErr(listBlocks(*listPath, *listHumanReadable)))
+
+	case tsdbFrostDBCmd.FullCommand():
+		os.Exit(checkErr(convertBlockFrostDB(*tsdbFrostDBAnalyzePath, *tsdbFrostDBAnalyzeBlockID)))
 
 	case tsdbDumpCmd.FullCommand():
 		os.Exit(checkErr(dumpSamples(*dumpPath, *dumpMinTime, *dumpMaxTime, *dumpMatch)))
